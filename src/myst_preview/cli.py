@@ -1,16 +1,17 @@
-"""myst-preview CLI: Preview a single file rendered with MyST MD."""
+"""myst-preview: Preview a single file rendered with MyST MD."""
 
 from __future__ import annotations
 
 import argparse
 import os
-import signal
 import shutil
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
 import time
+import webbrowser
 from pathlib import Path
 
 SUPPORTED_EXTENSIONS = {".md", ".ipynb", ".rst", ".tex"}
@@ -25,26 +26,19 @@ project:
 """
 
 
-def find_free_port(start: int, end: int = 0) -> int:
-    """Find a free port starting from `start`, trying up to `end` (inclusive)."""
-    if end == 0:
-        end = start + 50
-    for port in range(start, end + 1):
+def _find_free_port(start: int) -> int:
+    for port in range(start, start + 50):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
                 s.bind(("", port))
                 return port
             except OSError:
                 continue
-    print(
-        f"Error: no free port found in range {start}-{end}",
-        file=sys.stderr,
-    )
+    print(f"Error: no free port in range {start}-{start + 49}", file=sys.stderr)
     sys.exit(1)
 
 
-def wait_for_port(port: int, timeout: float = 30.0) -> bool:
-    """Poll until a port is accepting connections, or timeout."""
+def _wait_for_port(port: int, timeout: float = 30.0) -> bool:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -55,7 +49,7 @@ def wait_for_port(port: int, timeout: float = 30.0) -> bool:
     return False
 
 
-def find_myst() -> list[str]:
+def _find_myst() -> list[str]:
     myst = shutil.which("myst")
     if myst:
         return [myst]
@@ -63,10 +57,29 @@ def find_myst() -> list[str]:
     if npx:
         return [npx, "-y", "mystmd"]
     print(
-        "Error: 'myst' not found. Install with: npm install -g mystmd",
-        file=sys.stderr,
+        "Error: 'myst' not found. Install with: npm install -g mystmd", file=sys.stderr
     )
     sys.exit(1)
+
+
+def _setup_tmpdir(source: Path, theme: str) -> str:
+    tmpdir = tempfile.mkdtemp(prefix="myst-preview-")
+
+    # Symlink source directory contents so relative paths work.
+    for item in source.parent.iterdir():
+        if item.name.startswith("."):
+            continue
+        target = Path(tmpdir) / item.name
+        if not target.exists():
+            os.symlink(item, target)
+
+    # Write our own myst.yml (replace any symlinked one).
+    myst_yml = Path(tmpdir) / "myst.yml"
+    if myst_yml.is_symlink():
+        myst_yml.unlink()
+    myst_yml.write_text(MYST_YML_TEMPLATE.format(theme=theme, slug=source.stem))
+
+    return tmpdir
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -74,10 +87,7 @@ def main(argv: list[str] | None = None) -> None:
         prog="myst-preview",
         description="Preview a single Markdown or Jupyter notebook file rendered with MyST MD.",
     )
-    parser.add_argument(
-        "file",
-        help="File to preview (.md, .ipynb, .rst, .tex)",
-    )
+    parser.add_argument("file", help="File to preview (.md, .ipynb, .rst, .tex)")
     parser.add_argument(
         "--port",
         type=int,
@@ -85,14 +95,10 @@ def main(argv: list[str] | None = None) -> None:
         help="Port for the preview server (default: 3000)",
     )
     parser.add_argument(
-        "--theme",
-        default="book-theme",
-        help="MyST site template (default: book-theme)",
+        "--theme", default="book-theme", help="MyST site template (default: book-theme)"
     )
     parser.add_argument(
-        "--execute",
-        action="store_true",
-        help="Execute notebook/code cells",
+        "--execute", action="store_true", help="Execute notebook/code cells"
     )
     parser.add_argument(
         "--build",
@@ -100,14 +106,10 @@ def main(argv: list[str] | None = None) -> None:
         help="Build static HTML instead of starting a live server",
     )
     parser.add_argument(
-        "-o",
-        "--output",
-        help="Output directory for --build (default: ./_build/html)",
+        "-o", "--output", help="Output directory for --build (default: ./_build/html)"
     )
     parser.add_argument(
-        "--no-open",
-        action="store_true",
-        help="Don't open the preview in a browser",
+        "--no-open", action="store_true", help="Don't open the preview in a browser"
     )
     parser.add_argument(
         "--version",
@@ -128,10 +130,7 @@ def main(argv: list[str] | None = None) -> None:
         )
         sys.exit(1)
 
-    source_dir = source.parent
-    slug = source.stem
-
-    tmpdir = tempfile.mkdtemp(prefix="myst-preview-")
+    tmpdir = _setup_tmpdir(source, args.theme)
     proc = None
 
     def cleanup(*_: object) -> None:
@@ -153,23 +152,7 @@ def main(argv: list[str] | None = None) -> None:
     signal.signal(signal.SIGTERM, cleanup_and_exit)
 
     try:
-        # Symlink everything from the source directory so relative paths work.
-        for item in source_dir.iterdir():
-            if item.name.startswith("."):
-                continue
-            target = Path(tmpdir) / item.name
-            if not target.exists():
-                os.symlink(item, target)
-
-        # Write our own myst.yml (replace any symlinked one).
-        myst_yml = Path(tmpdir) / "myst.yml"
-        if myst_yml.is_symlink():
-            myst_yml.unlink()
-        myst_yml.write_text(
-            MYST_YML_TEMPLATE.format(theme=args.theme, slug=slug)
-        )
-
-        myst_cmd = find_myst()
+        myst_cmd = _find_myst()
 
         if args.build:
             cmd = [*myst_cmd, "build", "--html"]
@@ -187,30 +170,27 @@ def main(argv: list[str] | None = None) -> None:
                 shutil.copytree(build_dir, output_dir)
                 print(f"Output written to {output_dir}")
             sys.exit(result.returncode)
-        else:
-            port = find_free_port(args.port)
-            if port != args.port:
-                print(f"Port {args.port} is in use, using {port} instead.")
 
-            cmd = [*myst_cmd, "start", "--port", str(port), "--keep-host"]
-            if args.execute:
-                cmd.append("--execute")
+        port = _find_free_port(args.port)
+        if port != args.port:
+            print(f"Port {args.port} is in use, using {port} instead.")
 
-            # Bind to all interfaces so the preview is reachable over the network.
-            env = {**os.environ, "HOST": "0.0.0.0"}
+        cmd = [*myst_cmd, "start", "--port", str(port), "--keep-host"]
+        if args.execute:
+            cmd.append("--execute")
 
-            print(f"Starting MyST preview of {source.name}")
-            print("Press Ctrl+C to stop.\n")
+        # Bind to all interfaces so the preview is reachable over the network.
+        env = {**os.environ, "HOST": "0.0.0.0"}
 
-            proc = subprocess.Popen(cmd, cwd=tmpdir, env=env)
+        print(f"Starting MyST preview of {source.name}")
+        print("Press Ctrl+C to stop.\n")
 
-            if not args.no_open:
-                import webbrowser
+        proc = subprocess.Popen(cmd, cwd=tmpdir, env=env)
 
-                if wait_for_port(port):
-                    webbrowser.open(f"http://localhost:{port}")
+        if not args.no_open and _wait_for_port(port):
+            webbrowser.open(f"http://localhost:{port}")
 
-            proc.wait()
+        proc.wait()
     except Exception as e:
         print(f"Error: {e}", file=sys.stderr)
     finally:
