@@ -105,9 +105,9 @@ def main(argv: list[str] | None = None) -> None:
         help="Output directory for --build (default: ./_build/html)",
     )
     parser.add_argument(
-        "--open",
+        "--no-open",
         action="store_true",
-        help="Open the preview in a browser",
+        help="Don't open the preview in a browser",
     )
     parser.add_argument(
         "--version",
@@ -204,7 +204,7 @@ def main(argv: list[str] | None = None) -> None:
 
             proc = subprocess.Popen(cmd, cwd=tmpdir, env=env)
 
-            if args.open:
+            if not args.no_open:
                 import webbrowser
 
                 if wait_for_port(port):
